@@ -259,8 +259,9 @@ export default function App() {
       : 0;
 
   const nombreArchivo = () => {
-    const base = tituloTrabajo.trim() || cliente.trim() || "presupuesto";
-    return `presupuesto-${base.toLowerCase().replace(/\s+/g, "-")}.png`;
+    const fechaHoy = new Date().toLocaleDateString("es-AR");
+    const base = cliente.trim() || "presupuesto";
+    return `presupuesto-${base.toLowerCase().replace(/\s+/g, "-")}-${fechaHoy}.png`;
   };
 
   const descargarImagen = async () => {
