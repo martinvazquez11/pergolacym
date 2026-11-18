@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { toPng } from "html-to-image";
 
+type ModoPresupuesto = "detallado" | "global";
+
 interface Tarea {
   id: number;
   titulo: string;
@@ -21,9 +23,11 @@ const LIMITES = {
 } as const;
 
 interface DatosGuardados {
+  modo: ModoPresupuesto;
   cliente: string;
   tituloTrabajo: string;
   validez: string;
+  costoGlobal: string;
   tareas: Tarea[];
 }
 
@@ -31,27 +35,47 @@ function cargarEstadoInicial(): DatosGuardados {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      return { cliente: "", tituloTrabajo: "", validez: "15 días", tareas: [] };
+      return {
+        modo: "detallado",
+        cliente: "",
+        tituloTrabajo: "",
+        validez: "15 días",
+        costoGlobal: "",
+        tareas: [],
+      };
     }
     const parsed = JSON.parse(raw);
     return {
+      modo: parsed.modo === "global" ? "global" : "detallado",
       cliente: typeof parsed.cliente === "string" ? parsed.cliente : "",
       tituloTrabajo: typeof parsed.tituloTrabajo === "string" ? parsed.tituloTrabajo : "",
       validez: typeof parsed.validez === "string" ? parsed.validez : "15 días",
+      costoGlobal: typeof parsed.costoGlobal === "string" ? parsed.costoGlobal : "",
       tareas: Array.isArray(parsed.tareas) ? parsed.tareas : [],
     };
   } catch {
-    return { cliente: "", tituloTrabajo: "", validez: "15 días", tareas: [] };
+    return {
+      modo: "detallado",
+      cliente: "",
+      tituloTrabajo: "",
+      validez: "15 días",
+      costoGlobal: "",
+      tareas: [],
+    };
   }
 }
 
 export default function App() {
   const inicial = useRef<DatosGuardados>(cargarEstadoInicial()).current;
 
+  // Modo de presupuesto ("detallado" = precio por tarea | "global" = costo final único)
+  const [modo, setModo] = useState<ModoPresupuesto>(inicial.modo);
+
   // Datos generales
   const [cliente, setCliente] = useState(inicial.cliente);
   const [tituloTrabajo, setTituloTrabajo] = useState(inicial.tituloTrabajo);
   const [validez, setValidez] = useState(inicial.validez);
+  const [costoGlobal, setCostoGlobal] = useState(inicial.costoGlobal);
 
   // Estado de tareas y selección
   const [tareas, setTareas] = useState<Tarea[]>(inicial.tareas);
@@ -71,16 +95,18 @@ export default function App() {
   useEffect(() => {
     try {
       const payload: DatosGuardados = {
+        modo,
         cliente,
         tituloTrabajo,
         validez,
+        costoGlobal,
         tareas,
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch (err) {
       console.error("No se pudo guardar en localStorage:", err);
     }
-  }, [cliente, tituloTrabajo, validez, tareas]);
+  }, [modo, cliente, tituloTrabajo, validez, costoGlobal, tareas]);
 
   // Normaliza coma decimal de teclados móviles en español
   const parsearPrecio = (valor: string): number => {
@@ -90,12 +116,20 @@ export default function App() {
   };
 
   const precioNumerico = parsearPrecio(precioTarea);
+  const costoGlobalNumerico = parsearPrecio(costoGlobal);
+
+  // Validación del formulario de tarea según el modo activo
   const formularioValido =
     tituloTarea.trim().length > 0 &&
     tituloTarea.trim().length <= LIMITES.tituloTarea &&
     descTarea.trim().length <= LIMITES.descTarea &&
-    !isNaN(precioNumerico) &&
-    precioNumerico > 0;
+    (modo === "global" || (!isNaN(precioNumerico) && precioNumerico > 0));
+
+  // Validación para habilitar descarga de imagen
+  const puedeDescargar =
+    tareas.length > 0 &&
+    !generando &&
+    (modo === "detallado" || (!isNaN(costoGlobalNumerico) && costoGlobalNumerico > 0));
 
   const limpiarFormularioTarea = () => {
     setTituloTarea("");
@@ -109,12 +143,19 @@ export default function App() {
 
     const tituloLimpio = tituloTarea.trim().slice(0, LIMITES.tituloTarea);
     const descLimpia = descTarea.trim().slice(0, LIMITES.descTarea);
+    // En modo global se guarda 0 si no había precio previo, preservando el precio si luego vuelve a detallado
+    const precioFinal = modo === "detallado" ? precioNumerico : !isNaN(precioNumerico) && precioNumerico > 0 ? precioNumerico : 0;
 
     if (editandoId !== null) {
       setTareas((prev) =>
         prev.map((t) =>
           t.id === editandoId
-            ? { ...t, titulo: tituloLimpio, descripcion: descLimpia, precio: precioNumerico }
+            ? {
+                ...t,
+                titulo: tituloLimpio,
+                descripcion: descLimpia,
+                precio: modo === "detallado" ? precioNumerico : t.precio,
+              }
             : t
         )
       );
@@ -123,7 +164,7 @@ export default function App() {
         id: Date.now(),
         titulo: tituloLimpio,
         descripcion: descLimpia,
-        precio: precioNumerico,
+        precio: precioFinal,
       };
       setTareas((prev) => [...prev, nueva]);
     }
@@ -136,7 +177,7 @@ export default function App() {
     setEditandoId(tarea.id);
     setTituloTarea(tarea.titulo);
     setDescTarea(tarea.descripcion);
-    setPrecioTarea(String(tarea.precio));
+    setPrecioTarea(tarea.precio > 0 ? String(tarea.precio) : "");
     formTareaRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
@@ -190,6 +231,7 @@ export default function App() {
     const hayDatos =
       tituloTrabajo.trim() !== "" ||
       cliente.trim() !== "" ||
+      costoGlobal.trim() !== "" ||
       tareas.length > 0 ||
       tituloTarea.trim() !== "" ||
       precioTarea !== "";
@@ -201,13 +243,20 @@ export default function App() {
     setTituloTrabajo("");
     setCliente("");
     setValidez("15 días");
+    setCostoGlobal("");
     setTareas([]);
     setSeleccionadas([]);
     limpiarFormularioTarea();
     localStorage.removeItem(STORAGE_KEY);
   };
 
-  const total = tareas.reduce((acc, t) => acc + t.precio, 0);
+  const totalDetallado = tareas.reduce((acc, t) => acc + t.precio, 0);
+  const totalFinal =
+    modo === "detallado"
+      ? totalDetallado
+      : !isNaN(costoGlobalNumerico) && costoGlobalNumerico > 0
+      ? costoGlobalNumerico
+      : 0;
 
   const nombreArchivo = () => {
     const base = tituloTrabajo.trim() || cliente.trim() || "presupuesto";
@@ -215,7 +264,7 @@ export default function App() {
   };
 
   const descargarImagen = async () => {
-    if (!plantillaRef.current) return;
+    if (!plantillaRef.current || !puedeDescargar) return;
     setGenerando(true);
     try {
       const dataUrl = await toPng(plantillaRef.current, {
@@ -319,14 +368,40 @@ export default function App() {
           </div>
         </section>
 
-        {/* 2. CARGA / EDICIÓN DE TAREA */}
+        {/* 2. CARGA / EDICIÓN DE TAREA CON SELECTOR DE MODO */}
         <section
           ref={formTareaRef}
           className={`bg-[#2B2928] p-4 rounded-xl shadow-md border space-y-3 transition-colors ${
             editandoId !== null ? "border-amber-400 ring-2 ring-amber-400/30" : "border-neutral-500"
           }`}
         >
-          <div className="flex justify-between items-center">
+          {/* Selector de 2 modos */}
+          <div className="grid grid-cols-2 gap-1.5 bg-[#1F1D1C] p-1 rounded-lg border border-neutral-600">
+            <button
+              type="button"
+              onClick={() => setModo("detallado")}
+              className={`py-2 px-2.5 text-xs font-extrabold rounded-md transition-colors ${
+                modo === "detallado"
+                  ? "bg-amber-400 text-neutral-950 shadow-sm"
+                  : "text-neutral-300 hover:text-white"
+              }`}
+            >
+              Precio por tarea
+            </button>
+            <button
+              type="button"
+              onClick={() => setModo("global")}
+              className={`py-2 px-2.5 text-xs font-extrabold rounded-md transition-colors ${
+                modo === "global"
+                  ? "bg-amber-400 text-neutral-950 shadow-sm"
+                  : "text-neutral-300 hover:text-white"
+              }`}
+            >
+              Costo final único
+            </button>
+          </div>
+
+          <div className="flex justify-between items-center pt-1">
             <h2 className="text-sm font-bold text-white uppercase tracking-wider">
               {editandoId !== null ? "Editando Tarea" : "Agregar Tarea"}
             </h2>
@@ -376,42 +451,85 @@ export default function App() {
             </p>
           </div>
 
-          <div>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                inputMode="decimal"
-                enterKeyHint="done"
-                maxLength={LIMITES.precioTarea}
-                placeholder="Precio (> 0) *"
-                value={precioTarea}
-                onChange={(e) => setPrecioTarea(filtrarInputPrecio(e.target.value))}
-                onInput={(e) =>
-                  setPrecioTarea(filtrarInputPrecio((e.target as HTMLInputElement).value))
-                }
-                onKeyDown={handleKeyDown}
-                className="flex-1 p-3 bg-[#4f4b4a] text-white font-semibold placeholder-neutral-300 border border-neutral-400 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400"
-              />
-              <button
-                type="button"
-                onClick={guardarTarea}
-                disabled={!formularioValido}
-                className={`px-5 rounded-lg font-extrabold text-xl text-neutral-950 transition-colors disabled:bg-neutral-600 disabled:text-neutral-400 ${
-                  editandoId !== null
-                    ? "bg-amber-400 active:bg-amber-500"
-                    : "bg-white active:bg-neutral-200"
-                }`}
-              >
-                {editandoId !== null ? "✓" : "+"}
-              </button>
+          {/* En modo detallado muestra input de precio + botón; en modo global muestra botón directo */}
+          {modo === "detallado" ? (
+            <div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  enterKeyHint="done"
+                  maxLength={LIMITES.precioTarea}
+                  placeholder="Precio (> 0) *"
+                  value={precioTarea}
+                  onChange={(e) => setPrecioTarea(filtrarInputPrecio(e.target.value))}
+                  onInput={(e) =>
+                    setPrecioTarea(filtrarInputPrecio((e.target as HTMLInputElement).value))
+                  }
+                  onKeyDown={handleKeyDown}
+                  className="flex-1 p-3 bg-[#4f4b4a] text-white font-semibold placeholder-neutral-300 border border-neutral-400 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+                <button
+                  type="button"
+                  onClick={guardarTarea}
+                  disabled={!formularioValido}
+                  className={`px-5 rounded-lg font-extrabold text-xl text-neutral-950 transition-colors disabled:bg-neutral-600 disabled:text-neutral-400 ${
+                    editandoId !== null
+                      ? "bg-amber-400 active:bg-amber-500"
+                      : "bg-white active:bg-neutral-200"
+                  }`}
+                >
+                  {editandoId !== null ? "✓" : "+"}
+                </button>
+              </div>
+              {precioTarea !== "" && (!isNaN(precioNumerico) ? precioNumerico <= 0 : true) && (
+                <p className="text-xs font-semibold text-red-300 mt-1">
+                  El precio debe ser mayor a 0.
+                </p>
+              )}
             </div>
-            {precioTarea !== "" && (!isNaN(precioNumerico) ? precioNumerico <= 0 : true) && (
-              <p className="text-xs font-semibold text-red-300 mt-1">
-                El precio debe ser mayor a 0.
+          ) : (
+            <button
+              type="button"
+              onClick={guardarTarea}
+              disabled={!formularioValido}
+              className={`w-full py-3 rounded-lg font-extrabold text-sm text-neutral-950 transition-colors disabled:bg-neutral-600 disabled:text-neutral-400 ${
+                editandoId !== null
+                  ? "bg-amber-400 active:bg-amber-500"
+                  : "bg-white active:bg-neutral-200"
+              }`}
+            >
+              {editandoId !== null ? "✓ Guardar cambios de tarea" : "+ Agregar tarea a la lista"}
+            </button>
+          )}
+        </section>
+
+        {/* CAMPO DE COSTO FINAL ÚNICO (SOLO EN MODO GLOBAL) */}
+        {modo === "global" && (
+          <section className="bg-[#2B2928] p-4 rounded-xl shadow-md border border-amber-400/70 space-y-2">
+            <label className="text-xs font-extrabold text-amber-300 uppercase tracking-wider block">
+              Costo final de materiales y mano de obra *
+            </label>
+            <input
+              type="text"
+              inputMode="decimal"
+              enterKeyHint="done"
+              maxLength={LIMITES.precioTarea}
+              placeholder="Ej: 450000"
+              value={costoGlobal}
+              onChange={(e) => setCostoGlobal(filtrarInputPrecio(e.target.value))}
+              onInput={(e) =>
+                setCostoGlobal(filtrarInputPrecio((e.target as HTMLInputElement).value))
+              }
+              className="w-full p-3 bg-[#4f4b4a] text-white text-lg font-extrabold placeholder-neutral-400 border border-neutral-400 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400"
+            />
+            {costoGlobal !== "" && (!isNaN(costoGlobalNumerico) ? costoGlobalNumerico <= 0 : true) && (
+              <p className="text-xs font-semibold text-red-300">
+                El costo final debe ser mayor a 0.
               </p>
             )}
-          </div>
-        </section>
+          </section>
+        )}
 
         {/* 3. LISTA DE TAREAS Y ACCIONES DE BORRADO / EDICIÓN / REORDEN */}
         {tareas.length > 0 && (
@@ -473,9 +591,11 @@ export default function App() {
                           {t.descripcion}
                         </p>
                       )}
-                      <p className="font-extrabold text-amber-300 text-base mt-1">
-                        ${t.precio.toLocaleString("es-AR")}
-                      </p>
+                      {modo === "detallado" && (
+                        <p className="font-extrabold text-amber-300 text-base mt-1">
+                          ${t.precio.toLocaleString("es-AR")}
+                        </p>
+                      )}
                     </div>
 
                     {/* Controles de orden y edición */}
@@ -517,9 +637,15 @@ export default function App() {
               })}
             </ul>
 
-            <div className="pt-3 border-t border-neutral-500 flex justify-between items-center text-lg font-extrabold">
-              <span className="text-white">Total estimado:</span>
-              <span className="text-amber-300 text-xl">${total.toLocaleString("es-AR")}</span>
+            <div className="pt-3 border-t border-neutral-500 flex justify-between items-center gap-2 font-extrabold">
+              <span className="text-sm text-white">
+                {modo === "global"
+                  ? "Costo final de materiales y mano de obra:"
+                  : "Total estimado:"}
+              </span>
+              <span className="text-amber-300 text-xl whitespace-nowrap">
+                ${totalFinal.toLocaleString("es-AR")}
+              </span>
             </div>
           </section>
         )}
@@ -529,14 +655,14 @@ export default function App() {
           <button
             type="button"
             onClick={descargarImagen}
-            disabled={tareas.length === 0 || generando}
+            disabled={!puedeDescargar}
             className="w-full py-3.5 px-4 bg-white active:bg-neutral-200 text-neutral-950 font-extrabold text-base rounded-xl disabled:opacity-40 flex items-center justify-center gap-2 shadow-md transition-colors"
           >
             {generando ? "Generando imagen..." : "⬇ Descargar Presupuesto (PNG)"}
           </button>
         </section>
 
-        {/* 5. PLANTILLA OCULTA QUE SE RENDERIZA COMO IMAGEN (Fondo #4f4b4a, logo grande y texto blanco de alto contraste) */}
+        {/* 5. PLANTILLA OCULTA QUE SE RENDERIZA COMO IMAGEN */}
         <div className="overflow-hidden h-0 z-0">
           <div ref={plantillaRef} className="w-[1000px] p-10 bg-[#4f4b4a] text-white font-sans">
             {/* Encabezado: Empresa a la izquierda, Logo bien grande en el medio, Contacto a la derecha */}
@@ -641,13 +767,15 @@ export default function App() {
               </div>
             )}
 
-            {/* Tabla de Tareas con bordes negros, numeración y letras blancas bien marcadas */}
+            {/* Tabla de Tareas (con columna Importe solo en modo detallado) */}
             <table className="w-full mb-8 text-left border-collapse border-2 border-black">
               <thead>
                 <tr className="bg-[#1F1D1C] text-white text-sm font-extrabold uppercase tracking-wider">
                   <th className="py-3 px-3 border border-black w-12 text-center">#</th>
                   <th className="py-3 px-4 border border-black">Tarea / Descripción</th>
-                  <th className="py-3 px-4 border border-black text-right w-40">Importe</th>
+                  {modo === "detallado" && (
+                    <th className="py-3 px-4 border border-black text-right w-40">Importe</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -668,23 +796,25 @@ export default function App() {
                           </p>
                         )}
                       </td>
-                      <td className="py-4 px-4 border border-black text-right font-extrabold text-white text-lg align-top">
-                        ${t.precio.toLocaleString("es-AR")}
-                      </td>
+                      {modo === "detallado" && (
+                        <td className="py-4 px-4 border border-black text-right font-extrabold text-white text-lg align-top">
+                          ${t.precio.toLocaleString("es-AR")}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
               </tbody>
             </table>
 
-            {/* Total */}
+            {/* Bloque final: Total (modo detallado) o Costo final de materiales y mano de obra (modo global) */}
             <div className="flex justify-end">
               <div className="bg-[#1F1D1C] border-2 border-black text-white px-8 py-4 rounded-lg text-right">
                 <span className="text-neutral-100 text-base font-extrabold uppercase tracking-wider mr-4">
-                  Total
+                  {modo === "global" ? "Costo final de materiales y mano de obra" : "Total"}
                 </span>
-                <span className="text-3xl font-extrabold text-white">
-                  ${total.toLocaleString("es-AR")}
+                <span className="text-3xl font-extrabold text-white whitespace-nowrap">
+                  ${totalFinal.toLocaleString("es-AR")}
                 </span>
               </div>
             </div>
